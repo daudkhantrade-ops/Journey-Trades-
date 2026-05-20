@@ -1,42 +1,25 @@
-/**
- * Journey Trades — script.js  v2
- * Production-safe vanilla JS
- *
- * FIXES v2:
- *  - initNavbar: backdrop div injected via JS (no HTML change required),
- *    wired to toggleMenu so outside-tap closes the menu on mobile.
- *  - toggleMenu now manages backdrop visibility + aria states in one place.
- *  - Module-level _closeNav exposes toggleMenu(false) to sibling closures
- *    without a global variable or tight coupling.
- *  - initSmoothScroll: replaced duplicated manual close logic with _closeNav()
- *    so backdrop + scroll-lock are always cleaned up together.
- *  - initHeroSlideshow: guard against rapid visibilitychange re-entrancy.
- *
- * Modules:
- *  1. Navbar (transparent → solid on scroll, mobile toggle + backdrop)
- *  2. Hero Slideshow (robust image loading, production-safe)
- *  3. Scroll Reveal (IntersectionObserver with stagger)
- *  4. Active Nav Link
- *  5. Smooth Scroll
- *  6. Contact Form (validation + async submission + bot protection)
- */
-
 'use strict';
 
-// Track page load time for bot-detection timing check
-const PAGE_LOAD_TIME = Date.now();
-
 /*
- * Module-level shared close function.
- * Set by initNavbar once it runs. Used by initSmoothScroll so both modules
- * share the same close path without accessing each other's inner scope.
+ * Journey Trades — script.js  FINAL
+ *
+ * ROOT CAUSE FIX:
+ * The previous approach relied on CSS opacity/visibility to hide .mobile-nav
+ * while display:block was always set by the media query on mobile.
+ * On Android WebView / mobile Chrome, position:fixed + will-change +
+ * visibility:hidden does not reliably suppress painting — children bleed
+ * through, causing the overlap bug.
+ *
+ * THE FIX: CSS never makes .mobile-nav visible. It is display:none always.
+ * JavaScript alone toggles display via element.style.display.
+ * No opacity, no visibility, no will-change dependency for show/hide.
  */
+
+const PAGE_LOAD_TIME = Date.now();
 let _closeNav = null;
 
 
-/* ═══════════════════════════════════════════════════════════
-   1. NAVBAR
-═══════════════════════════════════════════════════════════ */
+/* ─── 1. NAVBAR ────────────────────────────────────────────── */
 (function initNavbar() {
   const nav       = document.getElementById('main-nav');
   const hamburger = document.getElementById('hamburger');
@@ -44,343 +27,267 @@ let _closeNav = null;
 
   if (!nav || !hamburger || !mobileNav) return;
 
-  // ── Create and inject the backdrop overlay ──────────────
-  // We create it in JS so the HTML doesn't need a new element.
-  // Backdrop sits between nav (z:100) and mobile-nav (z:99).
-  const backdrop = document.createElement('div');
-  backdrop.id        = 'nav-backdrop';
-  backdrop.className = 'nav-backdrop';
-  backdrop.setAttribute('aria-hidden', 'true');
-  // Insert right before mobile-nav in the DOM so stacking order is correct
-  mobileNav.parentNode.insertBefore(backdrop, mobileNav);
+  /* Guarantee hidden state regardless of CSS */
+  mobileNav.style.display = 'none';
 
-  // ── Initial state: transparent over hero ────────────────
+  /* Transparent → solid on scroll */
   nav.classList.add('nav-transparent');
-
-  // ── Scroll: transparent ↔ solid ─────────────────────────
-  let ticking = false;
-  function onScroll() {
-    if (!ticking) {
-      window.requestAnimationFrame(() => {
-        const solid = window.scrollY > 80;
-        nav.classList.toggle('nav-transparent', !solid);
-        nav.classList.toggle('nav-solid', solid);
-        ticking = false;
-      });
-      ticking = true;
+  window.addEventListener('scroll', function () {
+    if (window.scrollY > 80) {
+      nav.classList.remove('nav-transparent');
+      nav.classList.add('nav-solid');
+    } else {
+      nav.classList.remove('nav-solid');
+      nav.classList.add('nav-transparent');
     }
-  }
-  window.addEventListener('scroll', onScroll, { passive: true });
-  onScroll();
+  }, { passive: true });
 
-  // ── Saved scroll Y for iOS-safe scroll lock ──────────────
-  let _lockY = 0;
+  var isOpen = false;
+  var lockY  = 0;
 
-  // ── Core toggle function ─────────────────────────────────
-  // Single source of truth for all open/close actions.
   function toggleMenu(open) {
-    // Hamburger icon animation
+    isOpen = open;
+
+    /* Show / hide the panel */
+    mobileNav.style.display = open ? 'block' : 'none';
+
+    /* Hamburger icon animation */
     hamburger.classList.toggle('open', open);
     hamburger.setAttribute('aria-expanded', String(open));
+    mobileNav.setAttribute('aria-hidden',   String(!open));
 
-    // Mobile nav panel
-    mobileNav.classList.toggle('open', open);
-    mobileNav.setAttribute('aria-hidden', String(!open));
-
-    // Backdrop — fade in/out
-    backdrop.classList.toggle('open', open);
-
+    /* iOS-safe body scroll lock */
     if (open) {
-      /*
-       * iOS SAFARI SCROLL LOCK
-       * body.overflow:hidden alone does NOT stop scroll on iOS Safari —
-       * it makes the body a scroll container which mis-positions fixed
-       * elements. Correct pattern: save Y → body fixed at -Y → restore.
-       */
-      _lockY = window.scrollY;
+      lockY = window.scrollY;
       document.body.style.overflow  = 'hidden';
       document.body.style.position  = 'fixed';
-      document.body.style.top       = '-' + _lockY + 'px';
+      document.body.style.top       = '-' + lockY + 'px';
       document.body.style.width     = '100%';
     } else {
       document.body.style.overflow  = '';
       document.body.style.position  = '';
       document.body.style.top       = '';
       document.body.style.width     = '';
-      window.scrollTo(0, _lockY);
+      window.scrollTo(0, lockY);
     }
   }
 
-  // Expose close function to sibling closures
-  _closeNav = () => toggleMenu(false);
+  /* Expose to sibling modules */
+  _closeNav = function () { toggleMenu(false); };
 
-  // ── Event wiring ─────────────────────────────────────────
-
-  // Hamburger button — stopPropagation prevents the document click
-  // handler below from immediately closing the menu on the same event.
-  hamburger.addEventListener('click', (e) => {
+  /* Hamburger click — stopPropagation prevents the document
+     click handler from immediately closing the menu */
+  hamburger.addEventListener('click', function (e) {
     e.stopPropagation();
-    toggleMenu(!hamburger.classList.contains('open'));
+    toggleMenu(!isOpen);
   });
 
-  // Backdrop tap — closes menu (primary UX fix)
-  backdrop.addEventListener('click', () => toggleMenu(false));
-
-  // Links inside mobile nav
-  mobileNav.querySelectorAll('a').forEach(link => {
-    link.addEventListener('click', () => toggleMenu(false));
+  /* Links inside the panel */
+  mobileNav.querySelectorAll('a').forEach(function (link) {
+    link.addEventListener('click', function () { toggleMenu(false); });
   });
 
-  // Outside click (desktop safety net — backdrop already handles mobile)
-  document.addEventListener('click', (e) => {
-    if (
-      hamburger.classList.contains('open') &&
-      !nav.contains(e.target) &&
-      !mobileNav.contains(e.target)
-    ) {
+  /* Tap outside */
+  document.addEventListener('click', function (e) {
+    if (isOpen && !nav.contains(e.target) && !mobileNav.contains(e.target)) {
       toggleMenu(false);
     }
   });
 
-  // Escape key
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && hamburger.classList.contains('open')) {
+  /* Escape key */
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && isOpen) {
       toggleMenu(false);
-      hamburger.focus(); // return focus to trigger for a11y
+      hamburger.focus();
     }
   });
 })();
 
 
-/* ═══════════════════════════════════════════════════════════
-   2. HERO SLIDESHOW
-   Production-safe: uses data-src, pre-loads images, then
-   applies background-image only after each image has loaded.
-   Falls back gracefully if images 404.
-═══════════════════════════════════════════════════════════ */
+/* ─── 2. HERO SLIDESHOW ────────────────────────────────────── */
 (function initHeroSlideshow() {
-  const slides = Array.from(document.querySelectorAll('.hero-slide'));
-  if (slides.length === 0) return;
+  var slides   = Array.from(document.querySelectorAll('.hero-slide'));
+  if (!slides.length) return;
 
-  let current  = 0;
-  let timer    = null;
-  const DURATION  = 5000;
-  const PRELOADED = [];
+  var current  = 0;
+  var timer    = null;
+  var DURATION = 5000;
 
   function preload(src) {
-    return new Promise((resolve) => {
+    return new Promise(function (resolve) {
       if (!src) { resolve(null); return; }
-      const img   = new Image();
-      img.onload  = () => resolve(src);
-      img.onerror = () => resolve(null);
+      var img   = new Image();
+      img.onload  = function () { resolve(src); };
+      img.onerror = function () { resolve(null); };
       img.src     = src;
     });
   }
 
-  function applyBackground(slideEl, src) {
-    if (src) slideEl.style.backgroundImage = 'url("' + src + '")';
-  }
-
-  function goToSlide(idx) {
+  function goTo(idx) {
     slides[current].classList.remove('active');
     current = (idx + slides.length) % slides.length;
     slides[current].classList.add('active');
   }
 
-  function nextSlide() { goToSlide(current + 1); }
-
-  function startTimer() {
+  function start() {
     if (!timer && slides.length > 1) {
-      timer = setInterval(nextSlide, DURATION);
+      timer = setInterval(function () { goTo(current + 1); }, DURATION);
     }
   }
 
-  function stopTimer() {
+  function stop() {
     clearInterval(timer);
     timer = null;
   }
 
-  async function bootstrap() {
-    const loadPromises = slides.map((slideEl, i) => {
-      const src = slideEl.getAttribute('data-src') || '';
-      return preload(src).then(resolved => {
-        applyBackground(slideEl, resolved);
-        PRELOADED[i] = !!resolved;
+  /* Load first slide, then start rotation */
+  var first = slides[0].getAttribute('data-src') || '';
+  preload(first).then(function (src) {
+    if (src) slides[0].style.backgroundImage = 'url("' + src + '")';
+    slides[0].classList.add('active');
+
+    slides.slice(1).forEach(function (slide) {
+      var s = slide.getAttribute('data-src') || '';
+      preload(s).then(function (r) {
+        if (r) slide.style.backgroundImage = 'url("' + r + '")';
       });
     });
 
-    await loadPromises[0];
-    slides[0].classList.add('active');
+    start();
+  });
 
-    if (slides.length > 1) {
-      Promise.all(loadPromises.slice(1));
-      startTimer();
-    }
-  }
-
-  bootstrap();
-
-  // Pause when tab is hidden — prevents battery drain and
-  // guards against re-entrancy if visibilitychange fires rapidly
-  document.addEventListener('visibilitychange', () => {
-    document.hidden ? stopTimer() : startTimer();
+  document.addEventListener('visibilitychange', function () {
+    document.hidden ? stop() : start();
   });
 })();
 
 
-/* ═══════════════════════════════════════════════════════════
-   3. SCROLL REVEAL
-═══════════════════════════════════════════════════════════ */
+/* ─── 3. SCROLL REVEAL ─────────────────────────────────────── */
 (function initReveal() {
-  const els = document.querySelectorAll('.reveal');
+  var els = document.querySelectorAll('.reveal');
   if (!els.length) return;
 
   if (!('IntersectionObserver' in window)) {
-    els.forEach(el => el.classList.add('visible'));
+    els.forEach(function (el) { el.classList.add('visible'); });
     return;
   }
 
-  const observer = new IntersectionObserver((entries) => {
-    entries.forEach(entry => {
+  var observer = new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
       if (!entry.isIntersecting) return;
-
-      const el       = entry.target;
-      const siblings = el.parentElement
+      var el       = entry.target;
+      var siblings = el.parentElement
         ? Array.from(el.parentElement.querySelectorAll('.reveal:not(.visible)'))
         : [];
-      const delay = Math.min(siblings.indexOf(el) * 80, 320);
-
-      setTimeout(() => el.classList.add('visible'), delay);
+      var delay = Math.min(siblings.indexOf(el) * 80, 320);
+      setTimeout(function () { el.classList.add('visible'); }, delay);
       observer.unobserve(el);
     });
-  }, {
-    threshold: 0.07,
-    rootMargin: '0px 0px -50px 0px'
-  });
+  }, { threshold: 0.07, rootMargin: '0px 0px -50px 0px' });
 
-  els.forEach(el => observer.observe(el));
+  els.forEach(function (el) { observer.observe(el); });
 })();
 
 
-/* ═══════════════════════════════════════════════════════════
-   4. ACTIVE NAV LINK on scroll
-═══════════════════════════════════════════════════════════ */
+/* ─── 4. ACTIVE NAV LINK ───────────────────────────────────── */
 (function initActiveNav() {
-  const sections = document.querySelectorAll('section[id]');
-  const navLinks = document.querySelectorAll('.nav-links a[href^="#"]');
+  var sections = document.querySelectorAll('section[id]');
+  var links    = document.querySelectorAll('.nav-links a[href^="#"]');
+  if (!sections.length || !links.length) return;
 
-  if (!sections.length || !navLinks.length) return;
-
-  const sectionObserver = new IntersectionObserver((entries) => {
-    entries.forEach(entry => {
-      if (entry.isIntersecting) {
-        const id = entry.target.getAttribute('id');
-        navLinks.forEach(link => {
-          link.classList.toggle('active', link.getAttribute('href') === '#' + id);
-        });
-      }
+  new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
+      if (!entry.isIntersecting) return;
+      var id = entry.target.getAttribute('id');
+      links.forEach(function (link) {
+        link.classList.toggle('active', link.getAttribute('href') === '#' + id);
+      });
     });
-  }, { rootMargin: '-25% 0px -65% 0px' });
-
-  sections.forEach(sec => sectionObserver.observe(sec));
+  }, { rootMargin: '-25% 0px -65% 0px' }).observe
+    ? (function () {
+        var obs = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            var id = entry.target.getAttribute('id');
+            links.forEach(function (link) {
+              link.classList.toggle('active', link.getAttribute('href') === '#' + id);
+            });
+          });
+        }, { rootMargin: '-25% 0px -65% 0px' });
+        sections.forEach(function (sec) { obs.observe(sec); });
+      })()
+    : null;
 })();
 
 
-/* ═══════════════════════════════════════════════════════════
-   5. SMOOTH SCROLL + MOBILE MENU CLOSE
-═══════════════════════════════════════════════════════════ */
+/* ─── 5. SMOOTH SCROLL ─────────────────────────────────────── */
 (function initSmoothScroll() {
-  const navH = () => parseInt(
-    getComputedStyle(document.documentElement).getPropertyValue('--nav-h') || '68',
-    10
-  );
+  var navH = function () {
+    return parseInt(
+      getComputedStyle(document.documentElement).getPropertyValue('--nav-h') || '68',
+      10
+    );
+  };
 
-  document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+  document.querySelectorAll('a[href^="#"]').forEach(function (anchor) {
     anchor.addEventListener('click', function (e) {
-      const href = this.getAttribute('href');
+      var href   = this.getAttribute('href');
       if (href === '#') return;
-
-      const target = document.querySelector(href);
+      var target = document.querySelector(href);
       if (!target) return;
-
       e.preventDefault();
 
-      /*
-       * FIX: use _closeNav() instead of manually removing classes.
-       * This ensures the backdrop, body scroll-lock, and all aria
-       * attributes are cleaned up via the single toggleMenu(false) path.
-       */
+      /* Close nav via shared function — cleans up scroll-lock too */
       if (_closeNav) _closeNav();
 
-      // Small delay lets iOS finish the body position:fixed restore
-      // before we attempt scrollTo, preventing a jump artefact.
-      setTimeout(() => {
-        const top = target.getBoundingClientRect().top + window.scrollY - navH();
-        window.scrollTo({ top, behavior: 'smooth' });
+      setTimeout(function () {
+        var top = target.getBoundingClientRect().top + window.scrollY - navH();
+        window.scrollTo({ top: top, behavior: 'smooth' });
       }, 10);
     });
   });
 })();
 
 
-/* ═══════════════════════════════════════════════════════════
-   6. CONTACT FORM — Validation + async submission
-═══════════════════════════════════════════════════════════ */
+/* ─── 6. CONTACT FORM ──────────────────────────────────────── */
 (function initContactForm() {
-  const form      = document.getElementById('enquiry-form');
-  const submitBtn = document.getElementById('form-submit-btn');
-  const successEl = document.getElementById('form-success');
-
+  var form      = document.getElementById('enquiry-form');
+  var submitBtn = document.getElementById('form-submit-btn');
+  var successEl = document.getElementById('form-success');
   if (!form) return;
 
-  // Live validation: clear error as user types
-  form.querySelectorAll('input, select, textarea').forEach(field => {
-    field.addEventListener('input',  () => clearError(field));
-    field.addEventListener('change', () => clearError(field));
+  form.querySelectorAll('input, select, textarea').forEach(function (field) {
+    field.addEventListener('input',  function () { clearError(field); });
+    field.addEventListener('change', function () { clearError(field); });
   });
 
-  // Submit
-  form.addEventListener('submit', async (e) => {
+  form.addEventListener('submit', function (e) {
     e.preventDefault();
-
-    // Bot protection: reject submissions faster than 3 seconds
     if (Date.now() - PAGE_LOAD_TIME < 3000) return;
-
     if (!validateForm()) return;
 
     setLoading(true);
-
-    try {
-      const res = await fetch(form.action, {
-        method:  'POST',
-        body:    new FormData(form),
-        headers: { 'Accept': 'application/json' }
-      });
-
-      if (res.ok) {
-        showSuccess();
-      } else {
-        form.submit(); // FormSubmit redirect fallback
-      }
-    } catch (_err) {
-      console.warn('[Journey Trades] Async submit failed — falling back to native.', _err);
-      form.submit();
-    } finally {
-      setLoading(false);
-    }
+    fetch(form.action, {
+      method:  'POST',
+      body:    new FormData(form),
+      headers: { 'Accept': 'application/json' }
+    })
+    .then(function (res) {
+      if (res.ok) { showSuccess(); } else { form.submit(); }
+    })
+    .catch(function () { form.submit(); })
+    .finally(function () { setLoading(false); });
   });
 
-  // ── Helpers ──────────────────────────────────────────────
-
   function validateForm() {
-    let valid = true;
-    form.querySelectorAll('[required]').forEach(field => {
+    var valid = true;
+    form.querySelectorAll('[required]').forEach(function (field) {
       clearError(field);
-      const val = field.value.trim();
+      var val = field.value.trim();
       if (!val) {
         showError(field, 'This field is required.');
         valid = false;
-      } else if (field.type === 'email' && !isEmail(val)) {
+      } else if (field.type === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val)) {
         showError(field, 'Please enter a valid email address.');
         valid = false;
       }
@@ -390,14 +297,14 @@ let _closeNav = null;
 
   function showError(field, msg) {
     field.classList.add('invalid');
-    const errEl = field.closest('.form-group')?.querySelector('.form-error');
-    if (errEl) errEl.textContent = msg;
+    var el = field.closest('.form-group') && field.closest('.form-group').querySelector('.form-error');
+    if (el) el.textContent = msg;
   }
 
   function clearError(field) {
     field.classList.remove('invalid');
-    const errEl = field.closest('.form-group')?.querySelector('.form-error');
-    if (errEl) errEl.textContent = '';
+    var el = field.closest('.form-group') && field.closest('.form-group').querySelector('.form-error');
+    if (el) el.textContent = '';
   }
 
   function setLoading(state) {
@@ -411,9 +318,5 @@ let _closeNav = null;
       successEl.classList.add('visible');
       successEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
-  }
-
-  function isEmail(val) {
-    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val);
   }
 })();
